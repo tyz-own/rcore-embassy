@@ -29,13 +29,13 @@
 
 ```bash
 # setup build&run environment first
-$ git clone https://github.com/LearningOS/rCore-Tutorial-Code-2024S.git
-$ cd rCore-Tutorial-Code-2024S
-$ git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git user
-$ git checkout ch$ID
-$ cd os
+git clone https://github.com/LearningOS/rCore-Tutorial-Code-2024S.git
+cd rCore-Tutorial-Code-2024S
+git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git user
+git checkout ch$ID
+cd os
 # run OS in ch$ID
-$ make run
+make run
 ```
 Notice: $ID is from [1-9]
 
@@ -43,13 +43,13 @@ Notice: $ID is from [1-9]
 
 ```bash
 # setup build&run environment first
-$ git clone https://github.com/LearningOS/rCore-Tutorial-Code-2024S.git
-$ cd rCore-Tutorial-Code-2024S
-$ rm -rf ci-user
-$ git clone https://github.com/LearningOS/rCore-Tutorial-Checker-2024S.git ci-user
-$ git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git ci-user/user
-$ git checkout ch$ID
+git clone https://github.com/LearningOS/rCore-Tutorial-Code-2024S.git
+cd rCore-Tutorial-Code-2024S
+rm -rf ci-user
+git clone https://github.com/LearningOS/rCore-Tutorial-Checker-2024S.git ci-user
+git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git ci-user/user
+git checkout ch$ID
 # check&grade OS in ch$ID with more tests
-$ cd ci-user && make test CHAPTER=$ID
+cd ci-user && make test CHAPTER=$ID
 ```
 Notice: $ID is from [3,4,5,6,8]
