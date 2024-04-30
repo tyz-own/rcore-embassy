@@ -17,9 +17,10 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
 
 pub use context::TaskContext;
 
@@ -54,10 +55,13 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            task_info: TaskInfo::new(),
+            start_time: 0,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
+            // task.task_info.set_init_time();
         }
         TaskManager {
             num_app,
@@ -135,6 +139,28 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn get_current_task_info(&self) -> TaskInfo{
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let gap = get_time_ms() - inner.tasks[current].start_time;
+        inner.tasks[current].task_info.set_gap_time(gap);
+        inner.tasks[current].task_info.set_status(TaskStatus::Running);
+        let current_task_info = inner.tasks[current].task_info.clone();
+        // let mut current_task_info = inner.tasks[inner.current_task].task_info.clone();
+        drop(inner);
+        // current_task_info.set_gap_time();
+        // current_task_info.set_status(TaskStatus::Running);
+        // current_task_info.add_syscall_times(syscall_id)
+        current_task_info
+    }
+
+    fn add_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_info.add_syscall_times(syscall_id);
+        drop(inner);
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +194,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Get Current TaskInfo
+pub fn get_current_task_info() -> TaskInfo{
+    TASK_MANAGER.get_current_task_info()
+}
+
+/// add syscall times of current task
+pub fn add_syscall_times(syscall_id: usize){
+    TASK_MANAGER.add_syscall_times(syscall_id);
 }
