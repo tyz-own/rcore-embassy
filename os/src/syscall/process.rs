@@ -1,8 +1,11 @@
 //! Process management syscalls
 use crate::{
-    config::MAX_SYSCALL_NUM,
+    timer::get_time_us,
+    mm::VirtAddr,
     task::{
-        change_program_brk, exit_current_and_run_next, suspend_current_and_run_next, TaskStatus,
+        change_program_brk, exit_current_and_run_next, 
+        get_current_task_info, suspend_current_and_run_next, 
+        mmap, munmap, TaskInfo, 
     },
 };
 
@@ -13,16 +16,6 @@ pub struct TimeVal {
     pub usec: usize,
 }
 
-/// Task information
-#[allow(dead_code)]
-pub struct TaskInfo {
-    /// Task status in it's life cycle
-    status: TaskStatus,
-    /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// Total running time of task
-    time: usize,
-}
 
 /// task exits and submit an exit code
 pub fn sys_exit(_exit_code: i32) -> ! {
@@ -41,29 +34,74 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    -1
+    let phys_addr = VirtAddr(ts as usize).convert_to_phys_addr();
+    let us = get_time_us();
+    match phys_addr {
+        Some(phys_addr) => {
+            unsafe {
+                *(phys_addr.0 as *mut TimeVal) = TimeVal {
+                    sec: us / 1_000_000,
+                    usec: us % 1_000_000,
+                };
+            }
+            0
+        },
+        None => -1
+    }
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info NOT IMPLEMENTED YET!");
-    -1
+    let phys_addr = VirtAddr(ti as usize).convert_to_phys_addr();
+    let info : TaskInfo = get_current_task_info();
+    match phys_addr {
+        Some(phys_addr1) => {
+            unsafe {
+                *(phys_addr1.0 as *mut TaskInfo) = info;
+            }
+            0
+        },
+        None => -1
+    }
 }
 
 // YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+
+    if port & !0x7 != 0 || port & 0x7 == 0 {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len).ceil().into();
+
+    // let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let result = mmap(start_vir_addr, end_vir_addr, port);
+    result
 }
 
 // YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len);
+
+    
+    let result = munmap(start_vir_addr, end_vir_addr);
+    result
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {

@@ -15,12 +15,15 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission,VirtAddr,VPNRange};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
+
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+use crate::timer::get_time_ms;
+pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
 
 pub use context::TaskContext;
 
@@ -153,6 +156,62 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    // 获取当前任务info
+    fn get_current_task_info(&self) -> TaskInfo{
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let gap = get_time_ms() - inner.tasks[current].start_time;
+        inner.tasks[current].task_info.set_gap_time(gap);
+        let status = inner.tasks[current].task_status.clone();
+        inner.tasks[current].task_info.set_status(status);
+        let current_task_info = inner.tasks[current].task_info.clone();
+        // let mut current_task_info = inner.tasks[inner.current_task].task_info.clone();
+        drop(inner);
+        current_task_info
+    }
+
+    // 添加当前任务系统调用次数
+    fn add_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_info.add_syscall_times(syscall_id);
+        drop(inner);
+    }
+
+    // 为当前任务分配内存
+    fn mmap(&self, start_vir_addr: VirtAddr, end_vir_addr: VirtAddr, port: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        if inner.tasks[current].
+            memory_set
+            .exist_some_range(VPNRange::new(start_vir_addr.floor().into(), end_vir_addr.ceil().into()))
+            .is_some()
+        {
+            return -1;
+        }
+        let permission= MapPermission::from_bits_truncate((port<<1)as u8 | MapPermission::U.bits());
+        inner.tasks[current].memory_set.
+            insert_framed_area(start_vir_addr.floor().into(), end_vir_addr.ceil().into(), permission.into());
+        drop(inner);
+        0
+    }
+
+    // 为当前任务分配内存
+    fn munmap(&self, start_vir_addr: VirtAddr, end_vir_addr: VirtAddr) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        // if inner.tasks[current].memory_set
+        //     .exist_all_range(VPNRange::new(start_vir_addr.floor(), end_vir_addr.ceil()))
+        //     .is_none()
+        // {
+        //     return -1;
+        // }
+        let result = inner.tasks[current].memory_set.
+            delete_framed_area(start_vir_addr, end_vir_addr);
+        drop(inner);
+        result
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +260,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get Current TaskInfo
+pub fn get_current_task_info() -> TaskInfo{
+    TASK_MANAGER.get_current_task_info()
+}
+
+/// add syscall times of current task
+pub fn add_syscall_times(syscall_id: usize){
+    TASK_MANAGER.add_syscall_times(syscall_id);
+}
+
+/// 分配虚存
+pub fn mmap(start_vir_addr: VirtAddr, end_vir_addr: VirtAddr, port: usize) -> isize {
+    TASK_MANAGER.mmap(start_vir_addr, end_vir_addr, port)
+}
+
+/// 取消分配虚存
+pub fn munmap(start_vir_addr: VirtAddr, end_vir_addr: VirtAddr) -> isize {
+    TASK_MANAGER.munmap(start_vir_addr, end_vir_addr)
 }

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 
+/// 物理页号的分配与回收（单个）
 /// tracker for physical page frame allocation and deallocation
 pub struct FrameTracker {
     /// physical page number
@@ -38,11 +39,14 @@ impl Drop for FrameTracker {
     }
 }
 
+//一个物理页帧管理器需要提供哪些功能
 trait FrameAllocator {
     fn new() -> Self;
     fn alloc(&mut self) -> Option<PhysPageNum>;
     fn dealloc(&mut self, ppn: PhysPageNum);
 }
+
+/// 栈式物理页帧管理策略
 /// an implementation for frame allocator
 pub struct StackFrameAllocator {
     current: usize,

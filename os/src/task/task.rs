@@ -1,6 +1,12 @@
 //! Types related to task management
 use super::TaskContext;
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::{
+    // timer::get_time_ms,
+    config::{
+        MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE
+    },
+    timer::{get_time, get_time_ms},
+};
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +34,12 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    ///start time
+    pub start_time: usize,
+
+    /// The task info
+    pub task_info: TaskInfo,
 }
 
 impl TaskControlBlock {
@@ -63,6 +75,10 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            start_time: 
+                get_time_ms(),
+            task_info:
+                TaskInfo::new(),
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -109,4 +125,43 @@ pub enum TaskStatus {
     Running,
     /// exited
     Exited,
+}
+
+
+/// Task information
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub struct TaskInfo {
+    /// Task status in it's life cycle
+    status: TaskStatus,
+    /// The numbers of syscall called by task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// Total running time of task
+    time: usize,
+}
+impl TaskInfo{
+    /// Create a new `TaskInfo`
+    pub fn new() -> Self{
+        Self{
+            status: TaskStatus::Running,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            time: 0,
+        }
+    }
+    /// Set the status of task
+    pub fn set_status(&mut self, status: TaskStatus){
+        self.status = status;
+    }
+    /// Set the init_time of task
+    pub fn set_init_time(&mut self) {
+        self.time = get_time();
+    }
+    ///Set the Gap time of task
+    pub fn set_gap_time(&mut self, gap: usize) {
+        self.time = gap;
+    }
+    ///add_syscall_times
+    pub fn add_syscall_times(&mut self, syscall_id: usize){
+        self.syscall_times[syscall_id] += 1;
+    }
 }
