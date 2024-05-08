@@ -48,6 +48,21 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+
+    /// delete_area
+    pub fn delete_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let index = self.
+            areas.
+            iter().
+            position(|area| area.vpn_range.contains_all(VPNRange::new(start_va.floor().into(), end_va.ceil().into())));
+        if let Some(index) = index {
+            self.areas[index].unmap(&mut self.page_table);
+            self.areas.remove(index);
+            return 0;
+        }
+        -1
+        // self.areas.remove(index)
+    }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -300,6 +315,22 @@ impl MemorySet {
             false
         }
     }
+
+    /// 区间内有一部分虚存已映射
+    pub fn exist_some_range(&mut self, vpn_range: VPNRange) -> Option<&mut MapArea> {
+        self
+            .areas
+            .iter_mut()
+            .find(|area| area.vpn_range.contains(vpn_range))
+    }
+
+    /// 区间内有全部虚存已映射
+    pub fn exist_all_range(&mut self, vpn_range: VPNRange)-> Option<&mut MapArea>{
+        self
+            .areas
+            .iter_mut()
+            .find(|area| area.vpn_range.contains_all(vpn_range))
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -354,7 +385,11 @@ impl MapArea {
         }
         page_table.unmap(vpn);
     }
+    //将 MapArea 实例映射到给定的页表 page_table 中
+    /// 它们的实现是遍历逻辑段中的所有虚拟页面，
+        /// 并以每个虚拟页面为单位依次在多级页表中进行键值对的插入或删除
     pub fn map(&mut self, page_table: &mut PageTable) {
+        
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
         }
@@ -380,6 +415,10 @@ impl MapArea {
     }
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before
+    /// 将切片 data 中的数据拷贝到当前逻辑段实际被内核放置在的各物理页帧上，
+    /// 从而在地址空间中通过该逻辑段就能访问这些数据。
+    /// 调用它的时候需要满足：切片 data 中的数据大小不超过当前逻辑段的总大小，
+    /// 且切片中的数据会被对齐到逻辑段的开头，然后逐页拷贝到实际的物理页帧。
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
         assert_eq!(self.map_type, MapType::Framed);
         let mut start: usize = 0;

@@ -1,6 +1,9 @@
 //! Implementation of physical and virtual address and page number.
-use super::PageTableEntry;
-use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use super::{PageTableEntry, PageTable};
+use crate::{
+    config::{PAGE_SIZE, PAGE_SIZE_BITS},
+    task::current_user_token,
+    };
 use core::fmt::{self, Debug, Formatter};
 /// physical address
 const PA_WIDTH_SV39: usize = 56;
@@ -113,6 +116,14 @@ impl VirtAddr {
     pub fn aligned(&self) -> bool {
         self.page_offset() == 0
     }
+
+    /// Convert virtual address to physical address
+    pub fn convert_to_phys_addr(&self) -> Option<PhysAddr>{
+        PageTable::from_token(current_user_token())
+            .translate(self.floor())
+            .map(|pte| pte.ppn())
+            .map(|ppn| PhysAddr::new(ppn, self.page_offset()))
+    }
 }
 impl From<VirtAddr> for VirtPageNum {
     fn from(v: VirtAddr) -> Self {
@@ -141,6 +152,10 @@ impl PhysAddr {
     /// Check if the physical address is aligned by page size
     pub fn aligned(&self) -> bool {
         self.page_offset() == 0
+    }
+    /// 根据物理页号和偏移量 new 一个物理地址
+    pub fn new(ppn: PhysPageNum, offset: usize) -> Self {
+        PhysAddr(ppn.0 << 12 | offset)
     }
 }
 impl From<PhysAddr> for PhysPageNum {
@@ -226,6 +241,14 @@ where
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+    //包含一部分
+    pub fn contains(&self, another: SimpleRange<T>) -> bool {
+        self.l < another.r && self.r > another.l
+    }
+    //包含全部
+    pub fn contains_all(&self, another: SimpleRange<T>) -> bool {
+        self.l <= another.l && self.r >= another.r
     }
 }
 impl<T> IntoIterator for SimpleRange<T>

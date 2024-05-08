@@ -1,9 +1,14 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::{
+    // timer::get_time_ms,
+    config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE,},
+    timer::{get_time, get_time_ms},
+};
+
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -19,6 +24,7 @@ pub struct TaskControlBlock {
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
+    
 
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
@@ -26,9 +32,11 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     /// Get the mutable reference of the inner TCB
+    /// 尝试获取互斥锁来得到 TaskControlBlockInner 的可变引用。
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
@@ -36,28 +44,49 @@ impl TaskControlBlock {
     }
 }
 
+/// 注意我们在维护父子进程关系的时候大量用到了智能指针 Arc/Weak ，
+/// 当且仅当它的引用计数变为 0 的时候，
+/// 进程控制块以及被绑定到它上面的各类资源才会被回收。
 pub struct TaskControlBlockInner {
+
+    /// 该进程当前已经运行的“长度”
+    pub strid: usize,
+
+    /// stride 需要进行的累加值
+    pub pass: usize,
+
     /// The physical page number of the frame where the trap context is placed
+    /// 应用地址空间中的 Trap 上下文被放在的物理页帧的物理页号。
     pub trap_cx_ppn: PhysPageNum,
 
     /// Application data can only appear in areas
     /// where the application address space is lower than base_size
+    /// 应用数据仅有可能出现在应用地址空间低于 base_size 字节的区域中。
+    /// 借助它我们可以清楚的知道应用有多少数据驻留在内存中。
     pub base_size: usize,
 
     /// Save task context
+    /// 保存任务上下文，用于任务切换。
     pub task_cx: TaskContext,
 
     /// Maintain the execution status of the current process
+    /// 维护当前进程的执行状态
     pub task_status: TaskStatus,
 
     /// Application address space
+    /// 表示应用地址空间
     pub memory_set: MemorySet,
 
     /// Parent process of the current process.
     /// Weak will not affect the reference count of the parent
+    /// 指向当前进程的父进程（如果存在的话）。
+    /// 注意我们使用 Weak 而非 Arc 来包裹另一个任务控制块，
+    /// 因此这个智能指针将不会影响父进程的引用计数。
     pub parent: Option<Weak<TaskControlBlock>>,
 
     /// A vector containing TCBs of all child processes of the current process
+    /// 将当前进程的所有子进程的任务控制块以 Arc 
+    /// 智能指针的形式保存在一个向量中，这样才能够更方便的找到它们。
     pub children: Vec<Arc<TaskControlBlock>>,
 
     /// It is set when active exit or execution error occurs
@@ -68,6 +97,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    ///start time
+    pub start_time: usize,
+
+    /// The task info
+    pub task_info: TaskInfo,
 }
 
 impl TaskControlBlockInner {
@@ -91,6 +126,7 @@ impl TaskControlBlock {
     /// Create a new process
     ///
     /// At present, it is only used for the creation of initproc
+    /// 唯一一个初始进程
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
@@ -103,6 +139,7 @@ impl TaskControlBlock {
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
         // push a task context which goes to trap_return to the top of kernel stack
+        // let task_cx_ptr = kernel_stack.push_on_top(TaskContext::goto_trap_return());
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
@@ -118,8 +155,16 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    start_time: 
+                        get_time_ms(),
+                    task_info:
+                        TaskInfo::new(),
+                    strid: 0,
+                    pass: 0,
+
                 })
             },
+            
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -133,7 +178,9 @@ impl TaskControlBlock {
         task_control_block
     }
 
-    /// Load a new elf to replace the original application address space and start execution
+    /// Load a new elf to replace the original 
+    /// application address space and start execution
+    /// 当前进程加载并执行另一个 ELF 格式可执行文件。
     pub fn exec(&self, elf_data: &[u8]) {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
@@ -163,6 +210,7 @@ impl TaskControlBlock {
     }
 
     /// parent process fork the child process
+    /// 当前进程 fork 出来一个与之几乎相同的子进程。
     pub fn fork(self: &Arc<Self>) -> Arc<Self> {
         // ---- access parent PCB exclusively
         let mut parent_inner = self.inner_exclusive_access();
@@ -191,6 +239,12 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    start_time: 
+                        get_time_ms(),
+                    task_info:
+                        TaskInfo::new(),
+                    strid: 0,
+                    pass: 0,
                 })
             },
         });
@@ -207,6 +261,7 @@ impl TaskControlBlock {
     }
 
     /// get pid of process
+    /// 返回当前进程的进程标识符
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
@@ -236,6 +291,8 @@ impl TaskControlBlock {
             None
         }
     }
+
+    
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -249,4 +306,43 @@ pub enum TaskStatus {
     Running,
     /// exited
     Zombie,
+}
+
+
+/// Task information
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub struct TaskInfo {
+    /// Task status in it's life cycle
+    status: TaskStatus,
+    /// The numbers of syscall called by task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// Total running time of task
+    time: usize,
+}
+impl TaskInfo{
+    /// Create a new `TaskInfo`
+    pub fn new() -> Self{
+        Self{
+            status: TaskStatus::Running,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            time: 0,
+        }
+    }
+    /// Set the status of task
+    pub fn set_status(&mut self, status: TaskStatus){
+        self.status = status;
+    }
+    /// Set the init_time of task
+    pub fn set_init_time(&mut self) {
+        self.time = get_time();
+    }
+    ///Set the Gap time of task
+    pub fn set_gap_time(&mut self, gap: usize) {
+        self.time = gap;
+    }
+    ///add_syscall_times
+    pub fn add_syscall_times(&mut self, syscall_id: usize){
+        self.syscall_times[syscall_id] += 1;
+    }
 }
