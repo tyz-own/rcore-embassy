@@ -1,15 +1,16 @@
 //! Types related to task management & Functions for completely changing TCB
 
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{kstack_alloc, pid_alloc, KernelStack, TaskContext,PidHandle};
 use crate::{
-    config::TRAP_CONTEXT_BASE,
+    config::{TRAP_CONTEXT_BASE,MAX_SYSCALL_NUM},
     fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
+    mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
-    trap::{trap_handler, TrapContext},
+    trap::{trap_handler, TrapContext, },
+    timer::{get_time, get_time_ms},
 };
 use alloc::{
-    string::String,
+    // string::String,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
@@ -26,6 +27,7 @@ pub struct TaskControlBlock {
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
+    
 
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
@@ -33,9 +35,11 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     /// Get the mutable reference of the inner TCB
+    /// 尝试获取互斥锁来得到 TaskControlBlockInner 的可变引用。
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
@@ -43,50 +47,54 @@ impl TaskControlBlock {
     }
 }
 
+/// 注意我们在维护父子进程关系的时候大量用到了智能指针 Arc/Weak ，
+/// 当且仅当它的引用计数变为 0 的时候，
+/// 进程控制块以及被绑定到它上面的各类资源才会被回收。
 pub struct TaskControlBlockInner {
-    /// The physical page number of the frame where the trap context is placed
-    pub trap_cx_ppn: PhysPageNum,
 
-    /// Application data can only appear in areas
-    /// where the application address space is lower than base_size
-    pub base_size: usize,
+    /// 该进程当前已经运行的“长度”
+    pub strid: usize,
 
-    /// Save task context
-    pub task_cx: TaskContext,
+    /// stride 需要进行的累加值
+    pub pass: usize,
+   /// The physical page number of the frame where the trap context is placed
+   pub trap_cx_ppn: PhysPageNum,
 
-    /// Maintain the execution status of the current process
-    pub task_status: TaskStatus,
+   /// Application data can only appear in areas
+   /// where the application address space is lower than base_size
+   pub base_size: usize,
 
-    /// Application address space
-    pub memory_set: MemorySet,
+   /// Save task context
+   pub task_cx: TaskContext,
 
-    /// Parent process of the current process.
-    /// Weak will not affect the reference count of the parent
-    pub parent: Option<Weak<TaskControlBlock>>,
+   /// Maintain the execution status of the current process
+   pub task_status: TaskStatus,
 
-    /// A vector containing TCBs of all child processes of the current process
-    pub children: Vec<Arc<TaskControlBlock>>,
+   /// Application address space
+   pub memory_set: MemorySet,
 
-    /// It is set when active exit or execution error occurs
-    pub exit_code: i32,
-    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
-    pub signals: SignalFlags,
-    pub signal_mask: SignalFlags,
-    // the signal which is being handling
-    pub handling_sig: isize,
-    // Signal actions
-    pub signal_actions: SignalActions,
-    // if the task is killed
-    pub killed: bool,
-    // if the task is frozen by a signal
-    pub frozen: bool,
-    pub trap_ctx_backup: Option<TrapContext>,
+   /// Parent process of the current process.
+   /// Weak will not affect the reference count of the parent
+   pub parent: Option<Weak<TaskControlBlock>>,
 
-    /// Heap bottom
-    pub heap_bottom: usize,
+   /// A vector containing TCBs of all child processes of the current process
+   pub children: Vec<Arc<TaskControlBlock>>,
 
-    /// Program break
-    pub program_brk: usize,
+   /// It is set when active exit or execution error occurs
+   pub exit_code: i32,
+   pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+
+   /// Heap bottom
+   pub heap_bottom: usize,
+
+   /// Program break
+   pub program_brk: usize,
+
+    ///start time
+    pub start_time: usize,
+
+    /// The task info
+    pub task_info: TaskInfo,
 }
 
 impl TaskControlBlockInner {
@@ -116,6 +124,7 @@ impl TaskControlBlock {
     /// Create a new process
     ///
     /// At present, it is only used for the creation of initproc
+    /// 唯一一个初始进程
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
@@ -128,6 +137,7 @@ impl TaskControlBlock {
         let kernel_stack = kstack_alloc();
         let kernel_stack_top = kernel_stack.get_top();
         // push a task context which goes to trap_return to the top of kernel stack
+        // let task_cx_ptr = kernel_stack.push_on_top(TaskContext::goto_trap_return());
         let task_control_block = Self {
             pid: pid_handle,
             kernel_stack,
@@ -149,17 +159,18 @@ impl TaskControlBlock {
                         // 2 -> stderr
                         Some(Arc::new(Stdout)),
                     ],
-                    signals: SignalFlags::empty(),
-                    signal_mask: SignalFlags::empty(),
-                    handling_sig: -1,
-                    signal_actions: SignalActions::default(),
-                    killed: false,
-                    frozen: false,
-                    trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    start_time: 
+                        get_time_ms(),
+                    task_info:
+                        TaskInfo::new(),
+                    strid: 0,
+                    pass: 0,
+
                 })
             },
+            
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
@@ -174,37 +185,13 @@ impl TaskControlBlock {
     }
 
     /// Load a new elf to replace the original application address space and start execution
-    pub fn exec(&self, elf_data: &[u8], args: Vec<String>) {
+    pub fn exec(&self, elf_data: &[u8]) {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, mut user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
-        // push arguments on user stack
-        user_sp -= (args.len() + 1) * core::mem::size_of::<usize>();
-        let argv_base = user_sp;
-        let mut argv: Vec<_> = (0..=args.len())
-            .map(|arg| {
-                translated_refmut(
-                    memory_set.token(),
-                    (argv_base + arg * core::mem::size_of::<usize>()) as *mut usize,
-                )
-            })
-            .collect();
-        *argv[args.len()] = 0;
-        for i in 0..args.len() {
-            user_sp -= args[i].len() + 1;
-            *argv[i] = user_sp;
-            let mut p = user_sp;
-            for c in args[i].as_bytes() {
-                *translated_refmut(memory_set.token(), p as *mut u8) = *c;
-                p += 1;
-            }
-            *translated_refmut(memory_set.token(), p as *mut u8) = 0;
-        }
-        // make the user_sp aligned to 8B for k210 platform
-        user_sp -= user_sp % core::mem::size_of::<usize>();
 
         // **** access current TCB exclusively
         let mut inner = self.inner_exclusive_access();
@@ -213,22 +200,20 @@ impl TaskControlBlock {
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize trap_cx
-        let mut trap_cx = TrapContext::app_init_context(
+        let trap_cx = TrapContext::app_init_context(
             entry_point,
             user_sp,
             KERNEL_SPACE.exclusive_access().token(),
             self.kernel_stack.get_top(),
             trap_handler as usize,
         );
-        trap_cx.x[10] = args.len();
-        trap_cx.x[11] = argv_base;
         *inner.get_trap_cx() = trap_cx;
         // **** release current PCB
     }
 
     /// Fork from parent to child
     pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
-        // ---- hold parent PCB lock
+        // ---- access parent PCB exclusively
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
         let memory_set = MemorySet::from_existed_user(&parent_inner.memory_set);
@@ -263,16 +248,14 @@ impl TaskControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
-                    signals: SignalFlags::empty(),
-                    // inherit the signal_mask and signal_action
-                    signal_mask: parent_inner.signal_mask,
-                    handling_sig: -1,
-                    signal_actions: parent_inner.signal_actions.clone(),
-                    killed: false,
-                    frozen: false,
-                    trap_ctx_backup: None,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    start_time: 
+                        get_time_ms(),
+                    task_info:
+                        TaskInfo::new(),
+                    strid: 0,
+                    pass: 0,
                 })
             },
         });
@@ -289,6 +272,7 @@ impl TaskControlBlock {
     }
 
     /// get pid of process
+    /// 返回当前进程的进程标识符
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
@@ -318,6 +302,8 @@ impl TaskControlBlock {
             None
         }
     }
+
+    
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -331,4 +317,43 @@ pub enum TaskStatus {
     Running,
     /// exited
     Zombie,
+}
+
+
+/// Task information
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub struct TaskInfo {
+    /// Task status in it's life cycle
+    status: TaskStatus,
+    /// The numbers of syscall called by task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// Total running time of task
+    time: usize,
+}
+impl TaskInfo{
+    /// Create a new `TaskInfo`
+    pub fn new() -> Self{
+        Self{
+            status: TaskStatus::Running,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            time: 0,
+        }
+    }
+    /// Set the status of task
+    pub fn set_status(&mut self, status: TaskStatus){
+        self.status = status;
+    }
+    /// Set the init_time of task
+    pub fn set_init_time(&mut self) {
+        self.time = get_time();
+    }
+    ///Set the Gap time of task
+    pub fn set_gap_time(&mut self, gap: usize) {
+        self.time = gap;
+    }
+    ///add_syscall_times
+    pub fn add_syscall_times(&mut self, syscall_id: usize){
+        self.syscall_times[syscall_id] += 1;
+    }
 }

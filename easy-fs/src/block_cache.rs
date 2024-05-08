@@ -7,17 +7,21 @@ use lazy_static::*;
 use spin::Mutex;
 
 pub struct BlockCache {
-    cache: Vec<u8>,
-    block_id: usize,
-    block_device: Arc<dyn BlockDevice>,
-    modified: bool,
+    cache: Vec<u8>,     /// 位于内存中的缓冲区
+    block_id: usize,    /// 这个块的编号
+    block_device: Arc<dyn BlockDevice>,   /// 块所属的底层设备
+    modified: bool,                       // 缓冲区是否被修改
 }
 
 impl BlockCache {
     /// Load a new BlockCache from disk.
     pub fn new(block_id: usize, block_device: Arc<dyn BlockDevice>) -> Self {
         // for alignment and move effciency
-        let mut cache = vec![0u8; BLOCK_SZ];
+        // let mut cache = vec![0u8; BLOCK_SZ];
+        let mut cache = Vec::with_capacity(512);
+        unsafe{
+            cache.set_len(512);
+        }
         block_device.read_block(block_id, &mut cache);
         Self {
             cache,

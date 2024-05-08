@@ -1,15 +1,21 @@
 //! Process management syscalls
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
+// <<<<<<< HEAD
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, VirtAddr,},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        suspend_current_and_run_next, SignalAction, SignalFlags, TaskStatus, MAX_SIG,
+        add_task, current_task, current_user_token, exit_current_and_run_next, 
+        suspend_current_and_run_next,   
+        TaskInfo, get_current_task_info,  mmap, munmap,
     },
+    // loader::get_app_data_by_name,
+    timer::get_time_us,
 };
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
+
+/// P.pass = BigStride / P.priority 
+pub const BIG_STRIDE : usize = 1000;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -18,19 +24,9 @@ pub struct TimeVal {
     pub usec: usize,
 }
 
-/// Task information
-#[allow(dead_code)]
-pub struct TaskInfo {
-    /// Task status in it's life cycle
-    status: TaskStatus,
-    /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// Total running time of task
-    time: usize,
-}
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    trace!("kernel:pid[{}] sys_exit",current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_exit", current_task().unwrap().pid.0);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -42,12 +38,12 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-	trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
+    trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
 }
 
 pub fn sys_fork() -> isize {
-	trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
+    trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();
     let new_task = current_task.fork();
     let new_pid = new_task.pid.0;
@@ -61,28 +57,15 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
+pub fn sys_exec(path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
-    let mut args_vec: Vec<String> = Vec::new();
-    loop {
-        let arg_str_ptr = *translated_ref(token, args);
-        if arg_str_ptr == 0 {
-            break;
-        }
-        args_vec.push(translated_str(token, arg_str_ptr as *const u8));
-        unsafe {
-            args = args.add(1);
-        }
-    }
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
-        let argc = args_vec.len();
-        task.exec(all_data.as_slice(), args_vec);
-        // return argc because cx.x[10] will be covered with it later
-        argc as isize
+        task.exec(all_data.as_slice());
+        0
     } else {
         -1
     }
@@ -91,7 +74,7 @@ pub fn sys_exec(path: *const u8, mut args: *const usize) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-	//trace!("kernel: sys_waitpid");
+    //trace!("kernel: sys_waitpid");
     let task = current_task().unwrap();
     // find a child process
 
@@ -126,51 +109,87 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-pub fn sys_kill(pid: usize, signum: i32) -> isize {
-	trace!("kernel:pid[{}] sys_kill", current_task().unwrap().pid.0);
-    if let Some(task) = pid2task(pid) {
-        if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-            // insert the signal if legal
-            let mut task_ref = task.inner_exclusive_access();
-            if task_ref.signals.contains(flag) {
-                return -1;
-            }
-            task_ref.signals.insert(flag);
-            0
-        } else {
-            -1
-        }
-    } else {
-        -1
-    }
-}
-
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel:pid[{}] sys_get_time NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+
+    let phys_addr = VirtAddr(ts as usize).convert_to_phys_addr();
+    let us = get_time_us();
+    match phys_addr {
+        Some(phys_addr) => {
+            unsafe {
+                *(phys_addr.0 as *mut TimeVal) = TimeVal {
+                    sec: us / 1_000_000,
+                    usec: us % 1_000_000,
+                };
+            }
+            0
+        },
+        None => -1
+    }
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!("kernel:pid[{}] sys_task_info NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
+    trace!(
+        "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
+        current_task().unwrap().pid.0
+    );
+    let phys_addr = VirtAddr(ti as usize).convert_to_phys_addr();
+    let info : TaskInfo = get_current_task_info();
+    match phys_addr {
+        Some(phys_addr1) => {
+            unsafe {
+                *(phys_addr1.0 as *mut TaskInfo) = info;
+            }
+            0
+        },
+        None => -1
+    }
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel:pid[{}] sys_mmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    trace!(
+        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        current_task().unwrap().pid.0
+    );
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+
+    if port & !0x7 != 0 || port & 0x7 == 0 {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len).ceil().into();
+
+    // let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let result = mmap(start_vir_addr, end_vir_addr, port);
+    result
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel:pid[{}] sys_munmap NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!(
+        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        current_task().unwrap().pid.0
+    );
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len);
+
+    
+    let result = munmap(start_vir_addr, end_vir_addr);
+    result
 }
 
 /// change data segment size
@@ -185,83 +204,67 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_spawn NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!(
+        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        current_task().unwrap().pid.0
+    );
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    // let mut args_vec: Vec<String> = Vec::new();
+    // loop {
+    //     let arg_str_ptr = *translated_ref(token, args);
+    //     if arg_str_ptr == 0 {
+    //         break;
+    //     }
+    //     args_vec.push(translated_str(token, arg_str_ptr as *const u8));
+    //     unsafe {
+    //         args = args.add(1);
+    //     }
+    // }
+    if let Some(app_inode) = open_file(path.as_str(),OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let current_task = current_task().unwrap();
+        let new_task = current_task.fork();
+        let new_pid = new_task.pid.0;
+        // modify trap context of new_task, because it returns immediately after switching
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+        trap_cx.x[10] = 0;
+        // add new task to scheduler
+        new_task.exec(all_data.as_slice());
+        add_task(new_task);
+        // let task = Arc::new(TaskControlBlock::new(data));
+        // let pid = task.pid.0;
+        // add_task(task);
+        new_pid as isize
+    } else {
+        -1
+    }
+
+
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!("kernel:pid[{}] sys_set_priority NOT IMPLEMENTED", current_task().unwrap().pid.0);
-    -1
-}
-
-pub fn sys_sigprocmask(mask: u32) -> isize {
-    trace!("kernel:pid[{}] sys_sigprocmask", current_task().unwrap().pid.0);
-    if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        let old_mask = inner.signal_mask;
-        if let Some(flag) = SignalFlags::from_bits(mask) {
-            inner.signal_mask = flag;
-            old_mask.bits() as isize
-        } else {
-            -1
-        }
-    } else {
-        -1
-    }
-}
-
-pub fn sys_sigreturn() -> isize {
-    trace!("kernel:pid[{}] sys_sigreturn", current_task().unwrap().pid.0);
-    if let Some(task) = current_task() {
-        let mut inner = task.inner_exclusive_access();
-        inner.handling_sig = -1;
-        // restore the trap context
-        let trap_ctx = inner.get_trap_cx();
-        *trap_ctx = inner.trap_ctx_backup.unwrap();
-        // Here we return the value of a0 in the trap_ctx,
-        // otherwise it will be overwritten after we trap
-        // back to the original execution of the application.
-        trap_ctx.x[10] as isize
-    } else {
-        -1
-    }
-}
-
-fn check_sigaction_error(signal: SignalFlags, action: usize, old_action: usize) -> bool {
-    if action == 0
-        || old_action == 0
-        || signal == SignalFlags::SIGKILL
-        || signal == SignalFlags::SIGSTOP
-    {
-        true
-    } else {
-        false
-    }
-}
-
-pub fn sys_sigaction(
-    signum: i32,
-    action: *const SignalAction,
-    old_action: *mut SignalAction,
-) -> isize {
-    trace!("kernel:pid[{}] sys_sigaction", current_task().unwrap().pid.0);
-    let token = current_user_token();
-    let task = current_task().unwrap();
-    let mut inner = task.inner_exclusive_access();
-    if signum as usize > MAX_SIG {
+// syscall ID：140
+// 设置当前进程优先级为 prio
+// 参数：prio 进程优先级，要求 prio >= 2
+// 返回值：如果输入合法则返回 prio，否则返回 -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    trace!(
+        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        current_task().unwrap().pid.0
+    );
+    if prio < 2 {
         return -1;
     }
-    if let Some(flag) = SignalFlags::from_bits(1 << signum) {
-        if check_sigaction_error(flag, action as usize, old_action as usize) {
-            return -1;
-        }
-        let prev_action = inner.signal_actions.table[signum as usize];
-        *translated_refmut(token, old_action) = prev_action;
-        inner.signal_actions.table[signum as usize] = *translated_ref(token, action);
-        0
-    } else {
-        -1
-    }
+    let binding = current_task().unwrap();
+    let mut inner = binding.inner_exclusive_access();
+
+    inner.pass = BIG_STRIDE/prio as usize;
+    drop(inner);
+
+    prio
 }
+
