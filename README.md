@@ -48,8 +48,8 @@ cd rCore-Tutorial-Code-2024S
 rm -rf ci-user
 git clone https://github.com/LearningOS/rCore-Tutorial-Checker-2024S.git ci-user
 git clone https://github.com/LearningOS/rCore-Tutorial-Test-2024S.git ci-user/user
-git checkout ch4
+git checkout ch6
 # check&grade OS in ch$ID with more tests
-cd ci-user && make test CHAPTER=4
+cd ci-user && make test CHAPTER=6
 ```
 Notice: $ID is from [3,4,5,6,8]
