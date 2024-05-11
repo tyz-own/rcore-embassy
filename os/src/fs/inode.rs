@@ -4,15 +4,17 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
+// use crate::task::current_user_token;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
-use easy_fs::{EasyFileSystem, Inode};
+use easy_fs::{EasyFileSystem, Inode,};
 use lazy_static::*;
+use crate::fs::Stat;
 
 /// inode in memory
 /// A wrapper around a filesystem inode
@@ -122,6 +124,40 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             Arc::new(OSInode::new(readable, writable, inode))
         })
     }
+}
+
+
+/// link a file
+pub fn link(new_name: &str, old_name: &str) -> isize {
+    ROOT_INODE.link(new_name, old_name);
+    0
+}
+
+/// unlink a file
+pub fn unlink(name: &str) -> isize {
+    // let fd = find_inode_id(name);
+    ROOT_INODE.unlink(name);
+    0
+}
+
+/// get file stat
+pub fn fstat(osinode: &OSInode, st_info: &mut Stat){
+    // let token = current_user_token();
+    // let st_info = translated_refmut(token, st);
+    st_info.dev = 0;
+
+    let osinode_inner = osinode.inner.exclusive_access();
+
+    let inode = osinode_inner.inode.clone();
+    let ino = ROOT_INODE.get_inode_id(&inode) as u64;
+    st_info.ino = ino;
+    if ROOT_INODE.is_directory(&inode){
+        st_info.mode = StatMode::DIR;
+    }
+    else{
+        st_info.mode = StatMode::FILE;
+    }
+    st_info.nlink = ROOT_INODE.hard_link_count(ino as u32);
 }
 
 impl File for OSInode {

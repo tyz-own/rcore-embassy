@@ -12,9 +12,13 @@ mod heap_allocator;
 mod memory_set;
 mod page_table;
 
-use address::VPNRange;
-pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+// use address::VPNRange;
+pub use address::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 pub use frame_allocator::{frame_alloc, frame_dealloc, FrameTracker};
+// =======
+pub use address::{StepByOne, VPNRange};
+// pub use frame_allocator::{frame_alloc, FrameTracker};
+// >>>>>>> 46a42c8 (Merge branch 'ch5' of github.com:LearningOS/2024s-rcore-tyz-own into ch5)
 pub use memory_set::remap_test;
 pub use memory_set::{kernel_token, MapPermission, MemorySet, KERNEL_SPACE};
 use page_table::PTEFlags;

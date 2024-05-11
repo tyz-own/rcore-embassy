@@ -1,16 +1,23 @@
 //! Process management syscalls
 //!
-use alloc::sync::Arc;
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
+// <<<<<<< HEAD
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+
+    mm::{translated_refmut, translated_str, VirtAddr,},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, TaskStatus,
+        add_task, current_task, current_user_token, exit_current_and_run_next, 
+        suspend_current_and_run_next,   
+        TaskInfo, get_current_task_info,  mmap, munmap,
     },
+    // loader::get_app_data_by_name,
+    timer::get_time_us,
 };
+use alloc::sync::Arc;
+
+/// P.pass = BigStride / P.priority 
+pub const BIG_STRIDE : usize = 1000;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -19,16 +26,6 @@ pub struct TimeVal {
     pub usec: usize,
 }
 
-/// Task information
-#[allow(dead_code)]
-pub struct TaskInfo {
-    /// Task status in it's life cycle
-    status: TaskStatus,
-    /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// Total running time of task
-    time: usize,
-}
 
 pub fn sys_exit(exit_code: i32) -> ! {
     trace!("kernel:pid[{}] sys_exit", current_task().unwrap().pid.0);
@@ -117,41 +114,85 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel:pid[{}] sys_get_time NOT IMPLEMENTED", current_task().unwrap().pid.0);
+
+    let phys_addr = VirtAddr(ts as usize).convert_to_phys_addr();
+    let us = get_time_us();
+    match phys_addr {
+        Some(phys_addr) => {
+            unsafe {
+                *(phys_addr.0 as *mut TimeVal) = TimeVal {
+                    sec: us / 1_000_000,
+                    usec: us % 1_000_000,
+                };
+            }
+            0
+        },
+        None => -1
+    }
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
-pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
+
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
     trace!(
         "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let phys_addr = VirtAddr(ti as usize).convert_to_phys_addr();
+    let info : TaskInfo = get_current_task_info();
+    match phys_addr {
+        Some(phys_addr1) => {
+            unsafe {
+                *(phys_addr1.0 as *mut TaskInfo) = info;
+            }
+            0
+        },
+        None => -1
+    }
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+
+    if port & !0x7 != 0 || port & 0x7 == 0 {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len).ceil().into();
+
+    // let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let result = mmap(start_vir_addr, end_vir_addr, port);
+    result
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let start_vir_addr = VirtAddr(start as usize);
+
+    if !start_vir_addr.aligned() {
+        return -1;
+    }
+    let end_vir_addr = VirtAddr(start + len);
+
+    
+    let result = munmap(start_vir_addr, end_vir_addr);
+    result
 }
 
 /// change data segment size
@@ -166,19 +207,68 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    // let mut args_vec: Vec<String> = Vec::new();
+    // loop {
+    //     let arg_str_ptr = *translated_ref(token, args);
+    //     if arg_str_ptr == 0 {
+    //         break;
+    //     }
+    //     args_vec.push(translated_str(token, arg_str_ptr as *const u8));
+    //     unsafe {
+    //         args = args.add(1);
+    //     }
+    // }
+    if let Some(app_inode) = open_file(path.as_str(),OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let current_task = current_task().unwrap();
+        let new_task = current_task.fork();
+        let new_pid = new_task.pid.0;
+        // modify trap context of new_task, because it returns immediately after switching
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+        trap_cx.x[10] = 0;
+        // add new task to scheduler
+        new_task.exec(all_data.as_slice());
+        add_task(new_task);
+        // let task = Arc::new(TaskControlBlock::new(data));
+        // let pid = task.pid.0;
+        // add_task(task);
+        new_pid as isize
+    } else {
+        -1
+    }
+
+
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+// syscall ID：140
+// 设置当前进程优先级为 prio
+// 参数：prio 进程优先级，要求 prio >= 2
+// 返回值：如果输入合法则返回 prio，否则返回 -1
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+
+    if prio < 2 {
+        return -1;
+    }
+    let binding = current_task().unwrap();
+    let mut inner = binding.inner_exclusive_access();
+
+    inner.pass = BIG_STRIDE/prio as usize;
+    drop(inner);
+
+    prio
 }
+

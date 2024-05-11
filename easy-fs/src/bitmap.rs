@@ -34,7 +34,8 @@ impl Bitmap {
             )
             .lock()
             .modify(0, |bitmap_block: &mut BitmapBlock| {
-                if let Some((bits64_pos, inner_pos)) = bitmap_block
+                if let Some((bits64_pos, inner_pos))
+                 = bitmap_block
                     .iter()
                     .enumerate()
                     .find(|(_, bits64)| **bits64 != u64::MAX)

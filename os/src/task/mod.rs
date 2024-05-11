@@ -26,17 +26,19 @@ use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
 pub use context::TaskContext;
 use lazy_static::*;
-pub use manager::{fetch_task, TaskManager};
+use manager::fetch_task;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
 
-pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
+pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    mmap, munmap, get_current_task_info, add_syscall_times,
     Processor,
 };
-/// Suspend the current 'Running' task and run the next task in task list.
+
+/// Make current task suspended and switch to the next task
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task().unwrap();
@@ -46,13 +48,14 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+
     drop(task_inner);
     // ---- release current PCB
-
     // push back to ready queue.
     add_task(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
+    
 }
 
 /// pid of usertests app in make run TEST=1
@@ -104,6 +107,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     schedule(&mut _unused as *mut _);
 }
 
+
 lazy_static! {
     /// Creation of initial process
     ///
@@ -120,3 +124,5 @@ lazy_static! {
 pub fn add_initproc() {
     add_task(INITPROC.clone());
 }
+
+
