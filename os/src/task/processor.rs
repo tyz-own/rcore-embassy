@@ -12,6 +12,8 @@ use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
 
+/// 处理器管理结构 
+/// 负责维护 CPU 状态、调度和特权级切换等事务
 /// Processor management structure
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,

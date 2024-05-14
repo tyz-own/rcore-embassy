@@ -49,6 +49,12 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// deadlock_detect_enabled
+    pub deadlock_detect_enabled: bool,
+    /// mutex死锁检测
+    pub mutex_locker: ProcessLock,
+    /// semaphore死锁检测
+    pub semaphore_locker: ProcessLock,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +125,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_locker: ProcessLock::new(),
+                    semaphore_locker: ProcessLock::new(),
                 })
             },
         });
@@ -143,6 +152,8 @@ impl ProcessControlBlock {
         );
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
+        process_inner.mutex_locker.init();
+        process_inner.semaphore_locker.init();
         process_inner.tasks.push(Some(Arc::clone(&task)));
         drop(process_inner);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
@@ -245,6 +256,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_locker: ProcessLock::new(),
+                    semaphore_locker: ProcessLock::new(),
                 })
             },
         });
@@ -266,6 +280,8 @@ impl ProcessControlBlock {
         ));
         // attach task to child process
         let mut child_inner = child.inner_exclusive_access();
+        child_inner.mutex_locker.init();
+        child_inner.semaphore_locker.init();
         child_inner.tasks.push(Some(Arc::clone(&task)));
         drop(child_inner);
         // modify kstack_top in trap_cx of this thread
@@ -281,5 +297,117 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+}
+/// Locker of Process Control Block
+#[derive(Clone)]
+pub struct ProcessLock {
+    /// the available number of threads
+    pub available: Vec<usize>,
+    /// the allocated number of threads
+    pub allocation: Vec<Vec<usize>>,
+    /// the need number of threads
+    pub need: Vec<Vec<usize>>,
+    /// the finish number of threads
+    pub finished: Vec<bool>,
+}
+
+impl ProcessLock {
+    pub fn new() -> Self {
+        Self {
+            available: Vec::new(),
+            allocation: Vec::new(),
+            need: Vec::new(),
+            // finish is a flag, true means finish, false means not finish
+            finished: Vec::new(),
+        }
+    }
+    // finish
+    pub fn init(&mut self) {
+        self.available.resize(0, 0);
+        self.allocation.push(vec![]);
+        self.need.push(vec![]);
+        self.finished.push(false);
+    }
+    pub fn push_none(&mut self){
+        // let len = self.allocation[0].len();
+        self.allocation.push(vec![0; 0]);
+        self.need.push(vec![0; 0]);
+        self.finished.push(false);
+    }
+    pub fn add_new_thread(&mut self, _id: usize) {
+        
+    }
+    // finish
+    pub fn push_new_thread(&mut self) {
+        let len = self.allocation[0].len();
+        self.allocation.push(vec![0; len]);
+        self.need.push(vec![0; len]);
+        self.finished.push(false);
+    }
+    // finish
+    pub fn add(&mut self, resource_id: usize, count: usize) {
+        self.available[resource_id] += count;
+    }
+    // finish
+    pub fn push(&mut self, count: usize) {
+        self.available.push(count);
+        for i in self.allocation.iter_mut() {
+            i.push(0);
+        }
+        for i in self.need.iter_mut() {
+            i.push(0);
+        }
+    }
+    
+    //finish
+    pub fn unlock(&mut self, wake_tid: isize, current_tid: usize, resource_id: usize) {
+        self.available[resource_id] += 1;
+        self.allocation[current_tid][resource_id] -= 1;
+        self.finished[current_tid] = false;
+        if wake_tid != -1{
+            let wake_tid = wake_tid as usize;
+            self.need[wake_tid][resource_id] = 0;
+            self.allocation[wake_tid][resource_id] += 1;
+            self.available[resource_id] -= 1;
+        }
+    }
+
+    pub fn deadlock_detect(&mut self, resource_id: usize) -> bool{
+        let mut lock = self.clone();
+        for i in 0..lock.allocation.len(){
+            if lock.finished[i] == false && lock.need[i][resource_id] <= lock.available[resource_id]{
+                lock.available[resource_id] += lock.allocation[i][resource_id];
+                lock.finished[i] = true;
+            }
+        }
+
+        for i in 0..lock.finished.len(){
+            if lock.finished[i] == false{
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn lock(&mut self, resource_id: usize, tid: usize) -> usize {
+        if self.available[resource_id] > 0{
+            self.available[resource_id] -= 1;
+            self.allocation[tid][resource_id] += 1;
+            self.finished[tid] = true;
+            return 0;
+        } else {
+            self.need[tid][resource_id] += 1;
+            if self.deadlock_detect(resource_id) {
+                return 0xDEAD;
+            }
+            else{
+                return 0;
+            }
+        }
+    }
+    
+    pub fn finish(&mut self, tid: usize){
+        self.finished[tid] = true;
     }
 }
