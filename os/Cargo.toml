@@ -10,4 +10,11 @@ edition = "2021"
 buddy_system_allocator = "0.6"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 log = "0.4"
-riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+riscv-gitee = { git = "https://gitee.com/rcore-os/riscv", features = ["inline-asm"], package = "riscv" }
+# embassy-time = { version = "0.3", default-features = false, features = ["tick-hz-12_000_000"] } # 12_500_000 for qemu
+# embassy-executor = { version = "0.5", features = ["nightly", "executor-thread", "integrated-timers", "arch-riscv32"] }
+# embassy-time-driver = "0.1.0"
+# embassy-time = { path = "../../embassy/embassy-time/", default-features = false, features = ["tick-hz-12_000_000"] } # 12_500_000 for qemu
+# embassy-executor = { path = "../../embassy/embassy-executor/", features = ["log", "nightly", "executor-thread", "arch-riscv32"] }
+# embassy-time-driver = { path = "../../embassy/embassy-time-driver/" }
+riscv = { version = "0.11", features = ["critical-section-single-hart"] }

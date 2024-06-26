@@ -1,3 +1,4 @@
+
 //! Loading user applications into memory
 //!
 //! For chapter 3, user applications are simply part of the data included in the
